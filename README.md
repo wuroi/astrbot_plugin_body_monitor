@@ -1,12 +1,12 @@
 # 小洛的身体监控
 
-插件同时记录并更新每个部位的身体状态;在 WebUI 里点身体部位，角色会像被碰到一样回复。
+在 WebUI 里点身体部位，角色会像被碰到一样回复；插件同时记录并更新每个部位的身体状态。
 
-> 版本 1.1.0。内部插件名是 `astrbot_plugin_body_monitor`，显示名称是「小洛的身体监控」。
+> 版本 1.1.0。内部插件名是 `astrbot_plugin_body_monitor`（旧版叫 `astrbot_plugin_interact_touch`，设置文件会沿用），显示名称是「小洛的身体监控」。
 
 ## 安装
 
-- 在astrbot插件页面点击➕号,选择 `小洛的身体监控_v1.1.0.zip` ，或解压到 `data/plugins/` 下
+- 把 `小洛的身体监控_v1.1.0.zip` 上传到 AstrBot 插件管理，或解压到 `data/plugins/` 下
 - 在插件配置里填好「互动回复目标会话（UMO）」，或者先让机器人收到一条消息
 - 打开插件页即可使用；首次使用会自动生成 `positions.json` 和默认身体状态
 
@@ -175,6 +175,7 @@
 - `settings.json`：页面右侧的设置（互动触碰词库、连击、体温基线、持续时间范围、每部位上限、导出目录等）
 - `body_state.json`：每个预设各部位的温度、状态、剩余时间和严重度
 - `images/presets/`：每个预设自己的底图
+- `logo.png`：插件列表里的图标（512×512，想换自己的图直接覆盖这个文件即可）
 
 页面直链：`/api/v1/plugins/extensions/astrbot_plugin_body_monitor/ui`
 （在 WebUI 里打开会自动带登录态；直接访问需要先登录面板）
