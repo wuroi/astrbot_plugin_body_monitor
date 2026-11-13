@@ -5,6 +5,7 @@ import inspect
 import json
 import os
 import re
+import shutil
 import time
 from pathlib import Path
 from urllib.parse import unquote
@@ -15,21 +16,65 @@ from astrbot.api import logger
 from astrbot.api.event import MessageChain, filter
 from astrbot.api.star import Context, Star
 
-PLUGIN_DIR = Path(__file__).parent
+PLUGIN_NAME = "astrbot_plugin_body_monitor"
+PLUGIN_DIR = Path(__file__).resolve().parent
 UI_FILE = PLUGIN_DIR / "pages" / "touch" / "index.html"
 UI_FILE_OLD = PLUGIN_DIR / "ui.html"
 IMAGE_DIR = PLUGIN_DIR / "images"
-POS_FILE = PLUGIN_DIR / "positions.json"
+"""内置底图等只读资源；用户数据一律写到 data/plugin_data/<插件名>/ 下。"""
 DEFAULT_POS_FILE = PLUGIN_DIR / "default_positions.json"
-SESSION_FILE = PLUGIN_DIR / "session.json"
-SETTINGS_FILE = PLUGIN_DIR / "settings.json"
-STATE_FILE = PLUGIN_DIR / "body_state.json"
-PRESET_IMAGE_DIR = IMAGE_DIR / "presets"
-PLUGIN_NAME = "astrbot_plugin_body_monitor"
+"""出厂默认地图，只读资源。"""
+
+
+def _default_data_dir() -> Path:
+    # 插件固定装在 <AstrBot>/data/plugins/<名字>，因此 data/plugin_data 是可推导的；
+    # 这样不依赖启动目录，也符合 AstrBot 的插件数据规范。
+    if PLUGIN_DIR.parent.name == "plugins":
+        return PLUGIN_DIR.parent.parent / "plugin_data" / PLUGIN_NAME
+    try:
+        from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
+
+        return Path(get_astrbot_plugin_data_path()) / PLUGIN_NAME
+    except Exception:
+        return PLUGIN_DIR.parent.parent / "plugin_data" / PLUGIN_NAME
+
+
+DATA_DIR = _default_data_dir()
+CUSTOM_IMAGE_DIR = DATA_DIR / "images"
+PRESET_IMAGE_DIR = CUSTOM_IMAGE_DIR / "presets"
+POS_FILE = DATA_DIR / "positions.json"
+SESSION_FILE = DATA_DIR / "session.json"
+SETTINGS_FILE = DATA_DIR / "settings.json"
+STATE_FILE = DATA_DIR / "body_state.json"
+
+
+def _set_data_dir(path):
+    """测试/迁移用：重定向运行时数据目录。"""
+    global DATA_DIR, CUSTOM_IMAGE_DIR, PRESET_IMAGE_DIR
+    global POS_FILE, SESSION_FILE, SETTINGS_FILE, STATE_FILE
+    DATA_DIR = Path(path)
+    CUSTOM_IMAGE_DIR = DATA_DIR / "images"
+    PRESET_IMAGE_DIR = CUSTOM_IMAGE_DIR / "presets"
+    POS_FILE = DATA_DIR / "positions.json"
+    SESSION_FILE = DATA_DIR / "session.json"
+    SETTINGS_FILE = DATA_DIR / "settings.json"
+    STATE_FILE = DATA_DIR / "body_state.json"
+
+
+def _ensure_data_dir() -> bool:
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        CUSTOM_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+        return True
+    except Exception as exc:
+        logger.warning("[body_monitor] 创建数据目录失败: %s", exc)
+        return False
+
+
 PRESET_DEFAULT = "默认预设"
 DEFAULT_PROMPT = "你被{username}用{noun}{adj}{verb}了{detail}，这是一次远程且无法回避的触碰,请你对此进行一次回复，符合自身人设，评估生理变化,考虑上下文剧情,当前正在做的事,和此时的情绪，不要在回复中一直重复被触碰的部位,不需要描述部位被触碰后的具体变化,应当回复被触碰后的想法及此时的感受,确保回复通顺不突兀。"
 DEFAULT_STATE_PROMPT = "你现在是角色身体状态的记录器。请如实记录身体状态,每次更新都要评估全身，而不只是被交互触碰的部位。\n现在时间：{time}\n\n当前身体部位和状态（体温基线 {baseline}°C；每条状态带剩余秒数和严重度）：\n{states}\n\n本次事件：{action}\n角色回复：{reply}\n{history}本次重点部位 rid：{focus}\n\n要求：\n1. 全身评估：考虑连带反应（例如大腿被戳 → 大腿有点痒、心跳加快、左右脸发烫），把受影响部位的更新一起返回；不要只更新被碰的部位。\n2. 每个返回的部位都要给 temp（摄氏度；正常 {baseline}，发热或脸红可以上调,手冷脚冷可以降低）。没变化的部位可以省略。\n3. 每条状态给 text、duration（持续时间，秒，{min_duration}–{max_duration}）和 level（0=轻绿，1=中黄，2=重红）；notes 是该部位更新后的完整状态列表，最多 {max_notes} 条，消失的状态要删掉；备注只写状态本身，不要带时间或括号。\n4. 如果该部位已有未结束的状态，再次互动要叠加加重（有点痒 → 痒 → 很痒难受），并适当延长 duration。\n5. 持续时间宁长勿短：轻微状态一般 45–120 秒，中等 2–15 分钟，严重 15 分钟以上；除非明确马上消失，不要低于 45秒。参考剩余时间：水渍会干、红痕会退、疼痛会减轻；已经明显失效的状态要删掉。\n6. 只输出 JSON，不要解释，格式：{\"updates\":[{\"rid\":\"...\",\"temp\":36.8,\"notes\":[{\"text\":\"有点痒\",\"duration\":50,\"level\":0}]}]}\n7. 不需要更新的部位不要出现在 updates 里。"
-USAGE_DEFAULTS = USAGE_DEFAULTS = {"noun": "手指", "verb": "戳", "adj": "轻轻的"}
+USAGE_DEFAULTS = {"noun": "手指", "verb": "戳", "adj": "轻轻的"}
 DEFAULT_COOLDOWN = 6
 DEFAULT_COMBO_WINDOW = 2.0
 DEFAULT_STATE_TURN_INTERVAL = 3
@@ -103,15 +148,102 @@ class BodyMonitorPlugin(Star):
         ]
         for path, handler, methods, desc in routes:
             self.context.register_web_api(api + path, handler, methods, desc)
+        _ensure_data_dir()
+        self._migrate_legacy_data()
         self._load_session()
         self._migrate_current_image()
-        logger.info("[body_monitor] 触碰接口已注册")
+        logger.info("[body_monitor] 触碰接口已注册（数据目录 %s）", DATA_DIR)
+
+    def _migrate_legacy_data(self):
+        """把旧版本写在插件目录里的运行数据搬到 data/plugin_data/<插件名>/。"""
+        legacy_files = (
+            "positions.json",
+            "positions.json.bak",
+            "settings.json",
+            "session.json",
+            "body_state.json",
+        )
+        moved = []
+        try:
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            for name in legacy_files:
+                old = PLUGIN_DIR / name
+                new = DATA_DIR / name
+                if not old.exists():
+                    continue
+                try:
+                    if not new.exists():
+                        shutil.copy2(old, new)
+                        if new.read_bytes() != old.read_bytes():
+                            raise OSError("content mismatch")
+                    elif new.read_bytes() != old.read_bytes():
+                        logger.warning(
+                            "[body_monitor] %s 新旧内容不一致，保留旧文件待人工确认", name
+                        )
+                        continue
+                    old.unlink()
+                    moved.append(name)
+                except Exception as exc:
+                    logger.warning("[body_monitor] 迁移 %s 失败（保留旧文件）: %s", name, exc)
+
+            for name in ("custom.bin", "custom.mime", "custom.webp"):
+                old = IMAGE_DIR / name
+                new = CUSTOM_IMAGE_DIR / name
+                if not old.exists():
+                    continue
+                try:
+                    CUSTOM_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+                    if not new.exists():
+                        shutil.copy2(old, new)
+                        if new.read_bytes() != old.read_bytes():
+                            raise OSError("content mismatch")
+                    elif new.read_bytes() != old.read_bytes():
+                        logger.warning(
+                            "[body_monitor] images/%s 新旧内容不一致，保留旧文件待人工确认", name
+                        )
+                        continue
+                    old.unlink()
+                    moved.append("images/" + name)
+                except Exception as exc:
+                    logger.warning("[body_monitor] 迁移 %s 失败（保留旧文件）: %s", name, exc)
+
+            legacy_presets = IMAGE_DIR / "presets"
+            if legacy_presets.is_dir():
+                PRESET_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+                for item in list(legacy_presets.iterdir()):
+                    if not item.is_file():
+                        continue
+                    try:
+                        dest = PRESET_IMAGE_DIR / item.name
+                        if not dest.exists():
+                            shutil.copy2(item, dest)
+                            if dest.read_bytes() != item.read_bytes():
+                                raise OSError("content mismatch")
+                        elif dest.read_bytes() != item.read_bytes():
+                            logger.warning(
+                                "[body_monitor] 预设底图 %s 新旧内容不一致，保留旧文件待人工确认",
+                                item.name,
+                            )
+                            continue
+                        item.unlink()
+                        moved.append("images/presets/" + item.name)
+                    except Exception as exc:
+                        logger.warning("[body_monitor] 迁移预设底图失败: %s", exc)
+                try:
+                    legacy_presets.rmdir()
+                except OSError:
+                    pass
+
+            if moved:
+                logger.info("[body_monitor] 已迁移 %d 个旧数据文件到 %s", len(moved), DATA_DIR)
+        except Exception as exc:
+            logger.warning("[body_monitor] 迁移旧数据目录失败: %s", exc)
 
     async def get_custom_image(self):
-        f = IMAGE_DIR / "custom.bin"
-        mf = IMAGE_DIR / "custom.mime"
+        f = CUSTOM_IMAGE_DIR / "custom.bin"
+        mf = CUSTOM_IMAGE_DIR / "custom.mime"
         if not f.exists():
-            w = IMAGE_DIR / "custom.webp"
+            w = CUSTOM_IMAGE_DIR / "custom.webp"
             if w.exists():
                 return {
                     "status": "ok",
@@ -151,14 +283,14 @@ class BodyMonitorPlugin(Star):
             return {"status": "error", "message": "图片太小", "data": {}}
         if len(raw) > 30 * 1024 * 1024:
             return {"status": "error", "message": "图片超过 30MB", "data": {}}
-        IMAGE_DIR.mkdir(parents=True, exist_ok=True)
-        (IMAGE_DIR / "custom.bin").write_bytes(raw)
-        (IMAGE_DIR / "custom.mime").write_text(mime, encoding="utf-8")
+        CUSTOM_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+        (CUSTOM_IMAGE_DIR / "custom.bin").write_bytes(raw)
+        (CUSTOM_IMAGE_DIR / "custom.mime").write_text(mime, encoding="utf-8")
         try:
             self._store_preset_image(self._current_preset_name(), raw, mime)
         except Exception as exc:
             logger.warning("[body_monitor] 保存预设底图失败: %s", exc)
-        w = IMAGE_DIR / "custom.webp"
+        w = CUSTOM_IMAGE_DIR / "custom.webp"
         if w.exists():
             try:
                 w.unlink()
@@ -169,7 +301,7 @@ class BodyMonitorPlugin(Star):
 
     async def clear_image(self):
         for name in ("custom.bin", "custom.mime", "custom.webp"):
-            f = IMAGE_DIR / name
+            f = CUSTOM_IMAGE_DIR / name
             if f.exists():
                 try:
                     f.unlink()
@@ -233,10 +365,10 @@ class BodyMonitorPlugin(Star):
             mime = "image/jpeg"
             if mime_path.exists():
                 mime = mime_path.read_text(encoding="utf-8").strip() or mime
-            IMAGE_DIR.mkdir(parents=True, exist_ok=True)
-            (IMAGE_DIR / "custom.bin").write_bytes(raw)
-            (IMAGE_DIR / "custom.mime").write_text(mime, encoding="utf-8")
-            webp = IMAGE_DIR / "custom.webp"
+            CUSTOM_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+            (CUSTOM_IMAGE_DIR / "custom.bin").write_bytes(raw)
+            (CUSTOM_IMAGE_DIR / "custom.mime").write_text(mime, encoding="utf-8")
+            webp = CUSTOM_IMAGE_DIR / "custom.webp"
             if webp.exists():
                 try:
                     webp.unlink()
@@ -263,12 +395,12 @@ class BodyMonitorPlugin(Star):
             if any(PRESET_IMAGE_DIR.glob("*.bin")):
                 marker.write_text("1", encoding="utf-8")
                 return
-            bin_path = IMAGE_DIR / "custom.bin"
+            bin_path = CUSTOM_IMAGE_DIR / "custom.bin"
             if bin_path.exists():
                 cur = self._current_preset_name()
                 if not self._preset_has_image(cur):
                     mime = "image/jpeg"
-                    mime_path = IMAGE_DIR / "custom.mime"
+                    mime_path = CUSTOM_IMAGE_DIR / "custom.mime"
                     if mime_path.exists():
                         mime = mime_path.read_text(encoding="utf-8").strip() or mime
                     self._store_preset_image(cur, bin_path.read_bytes(), mime)
@@ -321,6 +453,7 @@ class BodyMonitorPlugin(Star):
         return path.with_name(f"{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
 
     def _write_doc(self, doc):
+        _ensure_data_dir()
         try:
             if POS_FILE.exists():
                 POS_FILE.with_suffix(".json.bak").write_text(
@@ -671,10 +804,13 @@ class BodyMonitorPlugin(Star):
         if data is None:
             return {"status": "error", "message": "没有这个预设：" + name}
         raw_dir = str(payload.get("dir") or "").strip() or self._export_dir()
+        target = self._safe_export_dir(raw_dir)
+        if target is None:
+            return {
+                "status": "error",
+                "message": "导出目录不允许：只能选当前用户目录下（如桌面、文档）或插件数据目录",
+            }
         try:
-            target = Path(os.path.expandvars(os.path.expanduser(raw_dir)))
-            if not target.is_absolute():
-                target = PLUGIN_DIR / target
             target.mkdir(parents=True, exist_ok=True)
         except Exception as exc:
             return {"status": "error", "message": "导出目录不可用：" + str(exc)}
@@ -1191,6 +1327,7 @@ class BodyMonitorPlugin(Star):
         return {}
 
     def _save_states(self, data: dict):
+        _ensure_data_dir()
         tmp = self._tmp_path(STATE_FILE)
         try:
             tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
@@ -1770,6 +1907,7 @@ class BodyMonitorPlugin(Star):
         return {}
 
     def _save_settings_raw(self, raw: dict):
+        _ensure_data_dir()
         tmp = self._tmp_path(SETTINGS_FILE)
         try:
             tmp.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
@@ -1837,15 +1975,47 @@ class BodyMonitorPlugin(Star):
             "state_max_notes": max_notes,
         }
 
+    def _allowed_export_roots(self):
+        roots = []
+        try:
+            roots.append(Path.home().resolve())
+        except Exception:
+            pass
+        try:
+            roots.append(DATA_DIR.resolve())
+        except Exception:
+            pass
+        return roots
+
+    def _safe_export_dir(self, raw: str = ""):
+        """只允许导出到用户目录或插件数据目录，避免任意路径写文件。"""
+        text = str(raw or "").strip()
+        if not text:
+            text = str(DATA_DIR / "exports")
+        try:
+            target = Path(os.path.expandvars(os.path.expanduser(text)))
+            if not target.is_absolute():
+                target = DATA_DIR / target
+            target = target.resolve()
+        except Exception:
+            return None
+        plugin = PLUGIN_DIR.resolve()
+        if target == plugin or plugin in target.parents:
+            return None
+        if target.exists() and not target.is_dir():
+            return None
+        if not any(
+            target == root or root in target.parents
+            for root in self._allowed_export_roots()
+        ):
+            return None
+        return target
+
     def _export_dir(self) -> str:
         raw = self._settings_raw()
         value = raw.get("export_dir")
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-        desktop = Path.home() / "Desktop"
-        if desktop.exists():
-            return str(desktop)
-        return str(PLUGIN_DIR / "exports")
+        safe = self._safe_export_dir(value if isinstance(value, str) else "")
+        return str(safe or (DATA_DIR / "exports"))
 
     async def get_settings(self):
         data = self._load_usage()
@@ -2173,6 +2343,7 @@ class BodyMonitorPlugin(Star):
             logger.warning("[body_monitor] 读取通道失败")
 
     def _save_session(self):
+        _ensure_data_dir()
         try:
             SESSION_FILE.write_text(
                 json.dumps({"umo": self.last_session, "user": self.last_user}, ensure_ascii=False),

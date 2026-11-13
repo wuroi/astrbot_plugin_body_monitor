@@ -2,7 +2,7 @@ name: astrbot_plugin_body_monitor
 display_name: 小洛的身体监控
 desc: 点身体部位触发互动，自动记录和更新身体状态
 help: 打开页面点部位；左侧查看身体状态；左侧「设置」编辑热区，右侧「状态参数 → 设置」调状态参数，「互动触碰」打开词库
-version: 1.1.0
+version: 1.1.1
 author: Zhalslar-style
 support_platforms: []
 astrbot_version: ">=4.13.0"

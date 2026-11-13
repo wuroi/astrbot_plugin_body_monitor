@@ -2,11 +2,11 @@
 
 在 WebUI 里点身体部位，角色会像被碰到一样回复；插件同时记录并更新每个部位的身体状态。
 
-> 版本 1.1.0。内部插件名是 `astrbot_plugin_body_monitor`（旧版叫 `astrbot_plugin_interact_touch`，设置文件会沿用），显示名称是「小洛的身体监控」。
+> 版本 1.1.1。内部插件名是 `astrbot_plugin_body_monitor`（旧版叫 `astrbot_plugin_interact_touch`，设置文件会沿用），显示名称是「小洛的身体监控」。
 
 ## 安装
 
-- 把 `小洛的身体监控_v1.1.0.zip` 上传到 AstrBot 插件管理，或解压到 `data/plugins/` 下
+- 把 `小洛的身体监控_v1.1.1.zip` 上传到 AstrBot 插件管理，或解压到 `data/plugins/` 下
 - 在插件配置里填好「互动回复目标会话（UMO）」，或者先让机器人收到一条消息
 - 打开插件页即可使用；首次使用会自动生成 `positions.json` 和默认身体状态
 
@@ -149,6 +149,7 @@
 - 「导出」把当前预设的热区和底图打包成 JSON
   - 浏览器支持时弹「另存为」，可以自己选位置和文件名
   - 不支持时弹出目录输入框，填目标文件夹即可；文件会写到那个目录，路径显示在底部提示里
+  - 出于安全考虑，导出目录只允许当前用户目录下（桌面、文档等）或插件数据目录；插件目录和系统目录会被拒绝
 - 「导入」选择 JSON 后会新建一个预设并切换过去
 - 每个预设可以有自己的底图：
   - 导入带图的预设会把图记在这个预设上
@@ -169,12 +170,17 @@
 
 ## 数据文件
 
+运行时数据统一放在 `data/plugin_data/astrbot_plugin_body_monitor/`，不再写进插件目录：
+
 - `positions.json`：坐标与预设（写入前留 `positions.json.bak`）
-- `default_positions.json`：默认坐标
 - `session.json`：最近一次收到消息的会话
 - `settings.json`：页面右侧的设置（互动触碰词库、连击、体温基线、持续时间范围、每部位上限、导出目录等）
 - `body_state.json`：每个预设各部位的温度、状态、剩余时间和严重度
+- `images/custom.*`：当前自定义底图
 - `images/presets/`：每个预设自己的底图
+- `exports/`：默认导出目录（如果没有另外设置）
+
+插件目录里只保留只读资源：`default_positions.json`（出厂地图）、`images/body.*`（内置底图）、`logo.png`（插件图标）。旧版本把数据放在插件目录里，升级/重载后会自动搬到 `data/plugin_data/astrbot_plugin_body_monitor/`。
 - `logo.png`：插件列表里的图标（512×512，想换自己的图直接覆盖这个文件即可）
 
 页面直链：`/api/v1/plugins/extensions/astrbot_plugin_body_monitor/ui`
@@ -186,6 +192,12 @@
 - 触碰事件通过 aiocqhttp 事件类注入流水线；其它平台会自动退回「直接生成 + `context.send_message`」路径
 
 ## 更新记录
+
+### 1.1.1
+
+- 运行时数据迁移到 `data/plugin_data/astrbot_plugin_body_monitor/`，旧数据自动搬迁
+- 导出目录限制在用户目录或插件数据目录，不能再写系统目录/插件目录
+- 插件图标改为 `logo.png`（小洛头像）
 
 ### 1.1.0
 

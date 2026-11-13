@@ -1928,7 +1928,7 @@ document.getElementById("presetExport").addEventListener("click", async () => {
   }
   const cfg = await plugGet("settings");
   const def = (cfg && cfg.export_dir) || "";
-  const dir = await askText("导出到哪个文件夹？可填绝对路径，如 D:\\备份", def);
+  const dir = await askText("导出到哪个文件夹？（只能选当前用户目录下，如桌面/文档，或插件数据目录）", def);
   if (dir === false || dir === null) return;
   const d = await plugPost("presets/export", {name: name, dir: dir});
   if (d && d.path) hint.textContent = "已导出到 " + d.path;
