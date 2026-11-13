@@ -1,0 +1,87 @@
+{
+  "body_state_enable": {
+    "type": "bool",
+    "description": "身体状态更新总开关",
+    "default": true,
+    "hint": "关闭后只保留触碰互动，不记录也不更新身体部位状态。"
+  },
+  "enable": {
+    "type": "bool",
+    "description": "触碰开关",
+    "default": true,
+    "hint": "关闭后，点击网页上的身体部位不会发出任何消息，也不会调用模型。"
+  },
+  "umo": {
+    "type": "string",
+    "description": "互动回复目标会话（UMO）",
+    "default": "",
+    "hint": "机器人要把回复发到哪个会话。格式：平台名:消息类型:会话ID，例如 平台名:FriendMessage:123456789（私聊）或 平台名:GroupMessage:123456789（群聊）。不会填的话，先让机器人收到一条消息，插件会自动记住最近会话。"
+  },
+  "state_tool_enable": {
+    "type": "bool",
+    "description": "允许角色查看身体状态工具",
+    "default": true,
+    "hint": "打开后，角色可以通过工具调用主动查看自己当前的身体状态（温度、状态、剩余时间）。不想让模型看到时可以关闭。"
+  },
+  "state_provider": {
+    "type": "string",
+    "description": "状态更新使用的模型",
+    "default": "",
+    "_special": "select_provider",
+    "hint": "留空表示跟随回复模型。状态更新是回复之后额外的一次调用，可以在这里单独选一个更快的模型省钱。列表由 AstrBot 的模型配置提供。"
+  },
+  "state_prompt": {
+    "type": "text",
+    "description": "状态更新提示词",
+    "default": "你现在是角色身体状态的记录器。请如实记录身体状态,每次更新都要评估全身，而不只是被交互触碰的部位。\n现在时间：{time}\n\n当前身体部位和状态（体温基线 {baseline}°C；每条状态带剩余秒数和严重度）：\n{states}\n\n本次事件：{action}\n角色回复：{reply}\n{history}本次重点部位 rid：{focus}\n\n要求：\n1. 全身评估：考虑连带反应（例如大腿被戳 → 大腿有点痒、心跳加快、左右脸发烫），把受影响部位的更新一起返回；不要只更新被碰的部位。\n2. 每个返回的部位都要给 temp（摄氏度；正常 {baseline}，发热或脸红可以上调,手冷脚冷可以降低）。没变化的部位可以省略。\n3. 每条状态给 text、duration（持续时间，秒，{min_duration}–{max_duration}）和 level（0=轻绿，1=中黄，2=重红）；notes 是该部位更新后的完整状态列表，最多 {max_notes} 条，消失的状态要删掉；备注只写状态本身，不要带时间或括号。\n4. 如果该部位已有未结束的状态，再次互动要叠加加重（有点痒 → 痒 → 很痒难受），并适当延长 duration。\n5. 持续时间宁长勿短：轻微状态一般 45–120 秒，中等 2–15 分钟，严重 15 分钟以上；除非明确马上消失，不要低于 45秒。参考剩余时间：水渍会干、红痕会退、疼痛会减轻；已经明显失效的状态要删掉。\n6. 只输出 JSON，不要解释，格式：{\"updates\":[{\"rid\":\"...\",\"temp\":36.8,\"notes\":[{\"text\":\"有点痒\",\"duration\":50,\"level\":0}]}]}\n7. 不需要更新的部位不要出现在 updates 里。",
+    "hint": "可用占位符：{time} 当前时间、{states} 当前部位状态、{action} 本次事件、{reply} 角色回复、{history} 最近对话、{focus} 重点部位 rid、{min_duration}/{max_duration} 持续时间范围、{max_notes} 每部位上限、{baseline} 体温基线。必须保留输出 JSON 的格式说明（updates）。"
+  },
+  "state_every_turns": {
+    "type": "bool",
+    "description": "按会话轮数定时更新状态",
+    "default": true,
+    "hint": "打开后每 N 轮正常聊天更新一次；任意一次状态更新（互动、提到部位、手动）都会把计数清零。"
+  },
+  "state_turn_interval": {
+    "type": "int",
+    "description": "每多少轮对话更新一次状态",
+    "default": 3,
+    "hint": "填 1 就是每轮正常聊天都更新；每次状态更新后从 0 重新计数，例如填 5 时，互动更新后要再聊 5 轮才触发定时更新。"
+  },
+  "state_history_turns": {
+    "type": "int",
+    "description": "状态更新参考最近多少轮对话",
+    "default": 10,
+    "hint": "定时更新、提到部位更新或手动更新时，会把这最近几轮对话一起交给模型参考，默认 10 轮；互动本身用当次回复，不额外拉历史。"
+  },
+  "touch_prompt": {
+    "type": "text",
+    "description": "触碰消息模板（提示词）",
+    "default": "你被{username}用{noun}{adj}{verb}了{detail}，这是一次远程且无法回避的触碰,请你对此进行一次回复，符合自身人设，评估生理变化,考虑上下文剧情,当前正在做的事,和此时的情绪，不要在回复中一直重复被触碰的部位,不需要描述部位被触碰后的具体变化,应当回复被触碰后的想法及此时的感受,确保回复通顺不突兀。",
+    "hint": "这段文字只发给模型，不会显示在聊天里。可用占位符：{detail}=逐部位次数（如「2次左手、3次右手」，单次为「一下左手」），{part}=部位名，{username}=对方昵称，{noun}/{adj}/{verb}=右侧「互动触碰」里选中的词，{count}=总次数，{times}=「一下」或「N次」，{time}=当前时间。"
+  },
+  "state_on_touch": {
+    "type": "bool",
+    "description": "互动后更新全身状态",
+    "default": true,
+    "hint": "每次点击热区、角色回复后，额外调用一次模型，评估全身并更新受影响的部位（包括心跳加快、脸红等连带反应），每条状态由模型设置持续时间。互动产生的隐藏对话不算普通聊天轮数；这次更新会把轮数清零。"
+  },
+  "state_on_mention": {
+    "type": "bool",
+    "description": "聊天提到身体部位时更新状态",
+    "default": false,
+    "hint": "打开后，普通聊天里如果提到热区名字（如「手」「头」），也会根据这一轮对话更新相关部位。会增加模型调用次数；这次更新也会把轮数清零，同一条回复最多触发一次更新。"
+  },
+  "cooldown": {
+    "type": "int",
+    "description": "互动冷却（秒）",
+    "default": 6,
+    "hint": "一次互动结算后，在这段时间内再次点击会被直接拒绝，不调用模型也不发消息。填 0 表示不冷却。"
+  },
+  "combo_window": {
+    "type": "float",
+    "description": "连击空闲判定（秒）",
+    "default": 2.0,
+    "hint": "点击后在这段时间内再次点击，会累加连击次数并重新计时；停手超过这个时间才结算成一次互动。例如设 1 秒，连点 5 次会合并成一次「戳了5次」。填 0 关闭连击。本项也可以直接在 WebUI 右侧「互动触碰」里修改。"
+  }
+}
