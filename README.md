@@ -1,0 +1,2 @@
+# astrbot_plugin_body_monitor
+主要用于检测角色身体各部位状态
