@@ -77,6 +77,7 @@
   .opt-item .opt-del:hover{background:#e8506a;color:#fff}
   .opt-add{flex:0 0 auto;width:24px;padding:2px 0;font-size:12px}
   .opt-new{width:76px;height:22px;padding:2px 4px;font-size:11px}
+.opt-empty{color:#6f6f80;font-size:11px;line-height:1.6;padding:3px 4px}
   .usage-preview{color:#ffb3c0;font-size:11px;line-height:1.5;padding:2px 0}
   input[type=text],select{background:#1b1b22;color:#d8d8de;border:1px solid #33333f;border-radius:4px;padding:3px 6px;font-size:12px;min-width:0;flex:1}
   input[type=range]{width:100%;accent-color:#ff78b4}
@@ -187,7 +188,7 @@
       </div>
       <div class="frow"><label>连击</label><input id="comboIn" type="number" min="0" max="10" step="0.1" placeholder="跟随配置"></div>
       <div class="usage-preview" id="usagePreview">用手指轻轻的戳</div>
-      <div style="color:#6d6d7c;font-size:11px;line-height:1.5">点选项切换当前组合，＋ 新增，选项右侧 × 删除；连击时间内连点会累加次数，停手后才结算一次互动</div>
+      <div style="color:#6d6d7c;font-size:11px;line-height:1.5">词库按「名词 → 形容词 → 动词」分层：在哪个条目下创建，就只在这个条目里显示；点选项切换，＋ 新增，× 删除（有下级会一起删）；连击时间内连点会累加次数，停手后才结算一次互动</div>
     </div>
   </aside>
   <div id="mask"><div id="dlg"><div id="dlgText"></div><div id="dlgBtns"><button id="dlgNo">取消</button><button id="dlgOk">删除</button></div></div></div>
@@ -2109,78 +2110,215 @@ const openStateSettingsBtn = document.getElementById("openStateSettings");
 const usagePreview = document.getElementById("usagePreview");
 const usageSummary = document.getElementById("usageSummary");
 const openUsageSettingsBtn = document.getElementById("openUsageSettings");
-const usageDefaults = {noun: "手指", adj: "轻轻的", verb: "戳"};
-const usageOptions = {noun: [], adj: [], verb: []};
-const usageSelected = {noun: "", adj: "", verb: ""};
+const USAGE_DEFAULT_TREE = [{n: "手指", adjs: [{n: "轻轻的", verbs: ["戳"]}]}];
+let usageTree = JSON.parse(JSON.stringify(USAGE_DEFAULT_TREE));
+let usageSel = {n: "手指", a: "轻轻的", v: "戳"};
 let usageTimer = null;
 let stateSettingsSnapshot = null;
+let usageSaveSeq = 0;
 
 function cleanUsageText(value){
   return String(value || "").trim().slice(0, 20);
 }
 
+function usageNounNode(){
+  return usageTree.find(x => x.n === usageSel.n) || null;
+}
+function usageAdjList(){
+  const noun = usageNounNode();
+  return noun && Array.isArray(noun.adjs) ? noun.adjs : [];
+}
+function usageAdjNode(){
+  return usageAdjList().find(x => x.n === usageSel.a) || null;
+}
+function usageVerbList(){
+  const adj = usageAdjNode();
+  return adj && Array.isArray(adj.verbs) ? adj.verbs : [];
+}
+
+function normalizeUsage(){
+  usageTree = (Array.isArray(usageTree) ? usageTree : [])
+    .filter(x => x && typeof x.n === "string")
+    .map(x => ({
+      n: String(x.n).slice(0, 24),
+      adjs: (Array.isArray(x.adjs) ? x.adjs : [])
+        .filter(a => a && typeof a.n === "string")
+        .map(a => ({
+          n: String(a.n).slice(0, 24),
+          verbs: (Array.isArray(a.verbs) ? a.verbs : [])
+            .filter(v => typeof v === "string" && v)
+            .map(v => String(v).slice(0, 24))
+            .slice(0, 30)
+        }))
+        .slice(0, 30)
+    }))
+    .slice(0, 30);
+  if (!usageTree.length){
+    usageSel = {n: "", a: "", v: ""};
+    return;
+  }
+  const noun = usageTree.find(x => x.n === usageSel.n) || usageTree[0];
+  usageSel.n = noun.n;
+  const adj = (noun.adjs || []).find(x => x.n === usageSel.a) || (noun.adjs || [])[0] || null;
+  usageSel.a = adj ? adj.n : "";
+  if (!adj){
+    usageSel.v = "";
+    return;
+  }
+  const verbs = adj.verbs || [];
+  usageSel.v = verbs.includes(usageSel.v) ? usageSel.v : (verbs[0] || "");
+}
+
 function updateUsagePreview(){
-  const phrase = "用" + (usageSelected.noun || "") + (usageSelected.adj || "") + (usageSelected.verb || "");
-  const text = phrase === "用" ? "—" : phrase;
+  const parts = [usageSel.n, usageSel.a, usageSel.v].filter(Boolean);
+  const text = parts.length ? "用" + parts.join("") : "—";
   if (usagePreview) usagePreview.textContent = text;
   if (usageSummary) usageSummary.textContent = text;
+}
+
+function renderUsageEmpty(box, text){
+  const el = document.createElement("div");
+  el.className = "opt-empty";
+  el.textContent = text;
+  box.appendChild(el);
+}
+
+function usageOptItem(kind, value){
+  const item = document.createElement("span");
+  item.className = "opt-item";
+  const btn = document.createElement("button");
+  btn.type = "button";
+  const selectedValue = kind === "noun" ? usageSel.n : (kind === "adj" ? usageSel.a : usageSel.v);
+  btn.className = "opt" + (selectedValue === value ? " on" : "");
+  btn.textContent = value;
+  btn.addEventListener("click", () => selectUsage(kind, value));
+  const del = document.createElement("button");
+  del.type = "button";
+  del.className = "opt-del";
+  del.textContent = "×";
+  del.title = "删除这个选项";
+  del.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    deleteUsage(kind, value);
+  });
+  item.appendChild(btn);
+  item.appendChild(del);
+  return item;
 }
 
 function renderUsageOptions(kind){
   const box = document.getElementById(kind + "Options");
   if (!box) return;
   box.innerHTML = "";
-  usageOptions[kind].forEach(value => {
-    const item = document.createElement("span");
-    item.className = "opt-item";
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "opt" + (usageSelected[kind] === value ? " on" : "");
-    btn.textContent = value;
-    btn.addEventListener("click", () => {
-      usageSelected[kind] = value;
-      renderUsageOptions(kind);
-      updateUsagePreview();
-      saveUsageNow();
-    });
-    const del = document.createElement("button");
-    del.type = "button";
-    del.className = "opt-del";
-    del.textContent = "×";
-    del.title = "删除这个选项";
-    del.addEventListener("click", (ev) => {
-      ev.stopPropagation();
-      deleteUsageOption(kind, value);
-    });
-    item.appendChild(btn);
-    item.appendChild(del);
-    box.appendChild(item);
-  });
+  if (kind === "noun"){
+    if (!usageTree.length){ renderUsageEmpty(box, "还没有名词，点 ＋ 添加"); return; }
+    usageTree.forEach(item => box.appendChild(usageOptItem("noun", item.n)));
+    return;
+  }
+  if (kind === "adj"){
+    const noun = usageNounNode();
+    if (!noun){ renderUsageEmpty(box, "先选一个名词"); return; }
+    const adjs = noun.adjs || [];
+    if (!adjs.length){ renderUsageEmpty(box, "这个名词下还没有形容词，点 ＋ 添加"); return; }
+    adjs.forEach(item => box.appendChild(usageOptItem("adj", item.n)));
+    return;
+  }
+  const adj = usageAdjNode();
+  if (!adj){ renderUsageEmpty(box, "先选一个形容词"); return; }
+  const verbs = adj.verbs || [];
+  if (!verbs.length){ renderUsageEmpty(box, "这个形容词下还没有动词，点 ＋ 添加"); return; }
+  verbs.forEach(value => box.appendChild(usageOptItem("verb", value)));
+}
+
+function renderAllUsage(){
+  ["noun", "adj", "verb"].forEach(renderUsageOptions);
+}
+
+function selectUsage(kind, value){
+  if (kind === "noun"){
+    usageSel.n = value;
+    usageSel.a = "";
+    usageSel.v = "";
+  } else if (kind === "adj"){
+    usageSel.a = value;
+    usageSel.v = "";
+  } else {
+    usageSel.v = value;
+  }
+  normalizeUsage();
+  renderAllUsage();
+  updateUsagePreview();
+  saveUsageNow();
 }
 
 function addUsageOption(kind, value){
   const text = cleanUsageText(value);
   if (!text) return;
-  if (!usageOptions[kind].includes(text)) usageOptions[kind].push(text);
-  usageSelected[kind] = text;
-  renderUsageOptions(kind);
+  if (kind === "noun"){
+    if (usageTree.some(item => item.n === text)){ hint.textContent = "已经有同名名词了"; return; }
+    usageTree.push({n: text, adjs: []});
+    usageSel = {n: text, a: "", v: ""};
+  } else if (kind === "adj"){
+    const noun = usageNounNode();
+    if (!noun){ hint.textContent = "先选一个名词"; return; }
+    if ((noun.adjs || []).some(item => item.n === text)){ hint.textContent = "这个名词下已经有同名形容词了"; return; }
+    noun.adjs.push({n: text, verbs: []});
+    usageSel.a = text;
+    usageSel.v = "";
+  } else {
+    const adj = usageAdjNode();
+    if (!adj){ hint.textContent = "先选一个形容词"; return; }
+    if ((adj.verbs || []).includes(text)){ hint.textContent = "这个形容词下已经有同名动词了"; return; }
+    adj.verbs.push(text);
+    usageSel.v = text;
+  }
+  normalizeUsage();
+  renderAllUsage();
   updateUsagePreview();
   saveUsageNow();
 }
 
-function deleteUsageOption(kind, value){
-  if (usageOptions[kind].length <= 1){
-    hint.textContent = "至少保留一个" + ({noun: "名词", adj: "形容词", verb: "动词"}[kind] || "选项");
-    return;
+async function deleteUsage(kind, value){
+  if (kind === "noun"){
+    const idx = usageTree.findIndex(item => item.n === value);
+    if (idx < 0) return;
+    const noun = usageTree[idx];
+    const adjCount = (noun.adjs || []).length;
+    const verbCount = (noun.adjs || []).reduce((sum, adj) => sum + (adj.verbs || []).length, 0);
+    if (adjCount || verbCount){
+      const ok = await askConfirm("删除名词「" + value + "」会同时删除 " + adjCount + " 个形容词、" + verbCount + " 个动词，确定？", "删除");
+      if (!ok) return;
+    }
+    usageTree.splice(idx, 1);
+    if (usageSel.n === value) usageSel = {n: "", a: "", v: ""};
+  } else if (kind === "adj"){
+    const noun = usageNounNode();
+    if (!noun) return;
+    const idx = (noun.adjs || []).findIndex(item => item.n === value);
+    if (idx < 0) return;
+    const adj = noun.adjs[idx];
+    const verbCount = (adj.verbs || []).length;
+    if (verbCount){
+      const ok = await askConfirm("删除形容词「" + value + "」会同时删除 " + verbCount + " 个动词，确定？", "删除");
+      if (!ok) return;
+    }
+    noun.adjs.splice(idx, 1);
+    if (usageSel.a === value){ usageSel.a = ""; usageSel.v = ""; }
+  } else {
+    const adj = usageAdjNode();
+    if (!adj) return;
+    adj.verbs = (adj.verbs || []).filter(item => item !== value);
+    if (usageSel.v === value) usageSel.v = "";
   }
-  usageOptions[kind] = usageOptions[kind].filter(item => item !== value);
-  if (usageSelected[kind] === value) usageSelected[kind] = usageOptions[kind][0];
-  renderUsageOptions(kind);
+  normalizeUsage();
+  renderAllUsage();
   updateUsagePreview();
   saveUsageNow();
 }
 
 function showUsageInput(kind){
+  if (kind === "adj" && !usageSel.n){ hint.textContent = "先选一个名词"; return; }
+  if (kind === "verb" && !usageSel.a){ hint.textContent = "先选一个形容词"; return; }
   const box = document.getElementById(kind + "Options");
   if (!box) return;
   const existing = box.querySelector(".opt-new");
@@ -2252,19 +2390,14 @@ function updateStateSummary(){
 async function loadUsage(){
   const d = await plugGet("settings");
   if (!d) return;
-  ["noun", "adj", "verb"].forEach(kind => {
-    const selected = typeof d[kind] === "string" ? d[kind].trim() : "";
-    let options = Array.isArray(d[kind + "_options"])
-      ? d[kind + "_options"].map(item => String(item).trim()).filter(Boolean)
-      : [];
-    if (!options.length) options = [selected || usageDefaults[kind]];
-    if (selected && !options.includes(selected)) options.unshift(selected);
-    usageOptions[kind] = options.slice(0, 30);
-    usageSelected[kind] = selected && usageOptions[kind].includes(selected)
-      ? selected
-      : usageOptions[kind][0];
-    renderUsageOptions(kind);
-  });
+  usageTree = Array.isArray(d.usage_tree)
+    ? d.usage_tree
+    : JSON.parse(JSON.stringify(USAGE_DEFAULT_TREE));
+  usageSel = (d.usage_selected && typeof d.usage_selected === "object")
+    ? {n: d.usage_selected.n || "", a: d.usage_selected.a || "", v: d.usage_selected.v || ""}
+    : {n: "", a: "", v: ""};
+  normalizeUsage();
+  renderAllUsage();
   updateUsagePreview();
   if (document.activeElement !== comboIn && typeof d.combo_window === "number"){
     comboIn.value = d.combo_window;
@@ -2290,13 +2423,10 @@ async function loadUsage(){
 
 async function saveUsageNow(){
   clearTimeout(usageTimer);
+  const seq = ++usageSaveSeq;
   const body = {
-    noun: usageSelected.noun,
-    adj: usageSelected.adj,
-    verb: usageSelected.verb,
-    noun_options: usageOptions.noun,
-    adj_options: usageOptions.adj,
-    verb_options: usageOptions.verb,
+    usage_tree: usageTree,
+    usage_selected: usageSel,
   };
   const cw = parseFloat(comboIn.value);
   if (comboIn.value.trim() !== "" && isFinite(cw)) body.combo_window = cw;
@@ -2312,6 +2442,15 @@ async function saveUsageNow(){
   if (!d){
     hint.textContent = "设置保存失败" + (lastError ? "：" + lastError : "");
     return false;
+  }
+  if (seq === usageSaveSeq && Array.isArray(d.usage_tree) && !document.querySelector(".opt-new")){
+    usageTree = d.usage_tree;
+    if (d.usage_selected && typeof d.usage_selected === "object"){
+      usageSel = d.usage_selected;
+    }
+    normalizeUsage();
+    renderAllUsage();
+    updateUsagePreview();
   }
   if (document.activeElement !== comboIn && typeof d.combo_window === "number"){
     comboIn.value = d.combo_window;

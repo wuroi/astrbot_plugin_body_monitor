@@ -73,8 +73,9 @@ def _ensure_data_dir() -> bool:
 
 PRESET_DEFAULT = "默认预设"
 DEFAULT_PROMPT = "你被{username}用{noun}{adj}{verb}了{detail}，这是一次远程且无法回避的触碰,请你对此进行一次回复，符合自身人设，评估生理变化,考虑上下文剧情,当前正在做的事,和此时的情绪，不要在回复中一直重复被触碰的部位,不需要描述部位被触碰后的具体变化,应当回复被触碰后的想法及此时的感受,确保回复通顺不突兀。"
-DEFAULT_STATE_PROMPT = "你现在是角色身体状态的记录器。请如实记录身体状态,每次更新都要评估全身，而不只是被交互触碰的部位。\n现在时间：{time}\n\n当前身体部位和状态（体温基线 {baseline}°C；每条状态带剩余秒数和严重度）：\n{states}\n\n本次事件：{action}\n角色回复：{reply}\n{history}本次重点部位 rid：{focus}\n\n要求：\n1. 全身评估：考虑连带反应（例如大腿被戳 → 大腿有点痒、心跳加快、左右脸发烫），把受影响部位的更新一起返回；不要只更新被碰的部位。\n2. 每个返回的部位都要给 temp（摄氏度；正常 {baseline}，发热或脸红可以上调,手冷脚冷可以降低）。没变化的部位可以省略。\n3. 每条状态给 text、duration（持续时间，秒，{min_duration}–{max_duration}）和 level（0=轻绿，1=中黄，2=重红）；notes 是该部位更新后的完整状态列表，最多 {max_notes} 条，消失的状态要删掉；备注只写状态本身，不要带时间或括号。\n4. 如果该部位已有未结束的状态，再次互动要叠加加重（有点痒 → 痒 → 很痒难受），并适当延长 duration。\n5. 持续时间宁长勿短：轻微状态一般 45–120 秒，中等 2–15 分钟，严重 15 分钟以上；除非明确马上消失，不要低于 45秒。参考剩余时间：水渍会干、红痕会退、疼痛会减轻；已经明显失效的状态要删掉。\n6. 只输出 JSON，不要解释，格式：{\"updates\":[{\"rid\":\"...\",\"temp\":36.8,\"notes\":[{\"text\":\"有点痒\",\"duration\":50,\"level\":0}]}]}\n7. 不需要更新的部位不要出现在 updates 里。"
+DEFAULT_STATE_PROMPT = "你现在是角色身体状态的记录器，如实记录身体状态。\n现在时间：{time}\n\n当前身体部位和状态（体温基线 {baseline}°C；有状态的部位带剩余秒数和严重度，其余部位只列编号和名称）：\n{states}\n\n本次事件：{action}\n角色回复：{reply}\n{history}本次重点部位 rid：{focus}\n\n要求：\n1. 先判断这次事件里人物身体会有什么反应，再对照上面的部位清单，把所有该出现变化的部位挑出来。可以只有一两个，也可以连带动一片（例如大腿被戳 → 大腿有点痒、心跳加快、左右脸发烫），但该变的一个都不能漏，不该变的不要硬凑。\n2. 每个返回的部位都要给 temp（摄氏度；正常 {baseline}，发热或脸红可以上调，手冷脚冷可以降低）。\n3. 每条状态给 text、duration（秒，{min_duration}–{max_duration}）和 level（0=轻绿，1=中黄，2=重红）；notes 是该部位更新后的完整状态列表，最多 {max_notes} 条，消失的状态要删掉；备注只写状态本身，不要带时间或括号。\n4. 该部位已有未结束的状态，再次互动要叠加加重（有点痒 → 痒 → 很痒难受），并适当延长 duration。\n5. 持续时间宁长勿短：轻微状态一般 45–120 秒，中等 2–15 分钟，严重 15 分钟以上；除非明确马上消失，不要低于 45 秒。水渍会干、红痕会退、疼痛会减轻，明显失效的状态要删掉。\n6. 只输出 JSON，不要解释，格式：{\"updates\":[{\"rid\":\"...\",\"temp\":36.8,\"notes\":[{\"text\":\"有点痒\",\"duration\":50,\"level\":0}]}]}\n7. 状态跟原来完全一样、没有任何实际变化的部位，不要出现在 updates 里。"
 USAGE_DEFAULTS = {"noun": "手指", "verb": "戳", "adj": "轻轻的"}
+USAGE_DEFAULT_TREE = [{"n": "手指", "adjs": [{"n": "轻轻的", "verbs": ["戳"]}]}]
 DEFAULT_COOLDOWN = 6
 DEFAULT_COMBO_WINDOW = 2.0
 DEFAULT_STATE_TURN_INTERVAL = 3
@@ -150,6 +151,7 @@ class BodyMonitorPlugin(Star):
             self.context.register_web_api(api + path, handler, methods, desc)
         _ensure_data_dir()
         self._migrate_legacy_data()
+        self._migrate_usage_settings()
         self._load_session()
         self._migrate_current_image()
         logger.info("[body_monitor] 触碰接口已注册（数据目录 %s）", DATA_DIR)
@@ -1069,6 +1071,10 @@ class BodyMonitorPlugin(Star):
         if session.count(":") < 2:
             self._log(part, "error", f"{part} · UMO 格式不对")
             return {"status": "error", "message": "UMO 格式不对：平台:消息类型:会话id"}
+        usage_error = self._usage_missing_message()
+        if usage_error:
+            self._log(part, "error", f"{part} · {usage_error}")
+            return {"status": "error", "message": usage_error}
         combo = self._combo.get(session)
         window = self._combo_window()
         if combo is None:
@@ -1129,6 +1135,12 @@ class BodyMonitorPlugin(Star):
             self._log("触碰", "error", "触碰已关闭，本次互动未发送")
             logger.info("[body_monitor] 触碰已关闭，丢弃一次待结算互动")
             return
+        usage = self._load_usage()
+        usage_error = self._usage_missing_message(usage)
+        if usage_error:
+            self._log("词库", "error", usage_error)
+            logger.info("[body_monitor] 词库不完整，丢弃一次待结算互动: %s", usage_error)
+            return
         self._last_touch[session] = time.time()
         normalized = {}
         for key, info in (parts or {}).items():
@@ -1163,7 +1175,6 @@ class BodyMonitorPlugin(Star):
             detail = "、".join(f"{n}次{p}" for p, n in list(name_counts.items())[:3])
             log_part = detail
         username = await self._get_username(session)
-        usage = self._load_usage()
         template = str(self.config.get("touch_prompt", DEFAULT_PROMPT) or DEFAULT_PROMPT)
         now_text = time.strftime("%Y-%m-%d %H:%M")
         times = "一下" if total <= 1 else f"{total}次"
@@ -1406,6 +1417,22 @@ class BodyMonitorPlugin(Star):
                     changed = True
                 notes.append(note)
             st["notes"] = notes
+            if not notes:
+                try:
+                    cur_t = float(st.get("temp", baseline))
+                except Exception:
+                    cur_t = float(baseline)
+                last_cool = st.get("cooled")
+                if isinstance(last_cool, bool) or not isinstance(last_cool, (int, float)):
+                    last_cool = 0.0
+                if abs(cur_t - float(baseline)) > 0.05 and now - float(last_cool) >= 15:
+                    step = 0.3
+                    nt = cur_t - step if cur_t > baseline else cur_t + step
+                    if abs(nt - baseline) < step:
+                        nt = float(baseline)
+                    st["temp"] = round(nt, 1)
+                    st["cooled"] = now
+                    changed = True
             st.setdefault("updated", now)
             out[rid] = st
         if set(raw.keys()) != set(out.keys()):
@@ -1577,7 +1604,8 @@ class BodyMonitorPlugin(Star):
         states = self._active_states(preset)
         now = time.time()
         baseline = self._state_ui_settings()["state_baseline_temp"]
-        lines = []
+        active_lines = []
+        idle_names = []
         for r in regions[:120]:
             rid = str(r.get("rid") or "")
             if not rid:
@@ -1597,10 +1625,23 @@ class BodyMonitorPlugin(Star):
                 remain = max(0, int(expires - now))
                 level = {0: "轻", 1: "中", 2: "重"}.get(note.get("level"), "中")
                 notes.append(f"{text}（剩余{remain}秒，{level}）")
-            lines.append(
-                f"- rid={rid} 名称={name} 温度={temp_text} 状态={'、'.join(notes) if notes else '无'}"
+            temp_hot = (
+                isinstance(temp, (int, float))
+                and not isinstance(temp, bool)
+                and abs(float(temp) - float(baseline)) >= 0.2
             )
-        return "\n".join(lines) or "（当前预设没有部位）"
+            if notes or temp_hot:
+                active_lines.append(
+                    f"- rid={rid} 名称={name} 温度={temp_text} 状态={'、'.join(notes) if notes else '无'}"
+                )
+            else:
+                idle_names.append(f"{rid} {name}")
+        out = "\n".join(active_lines)
+        if idle_names:
+            if out:
+                out += "\n"
+            out += "其余部位当前无状态（只列编号和名称，要改就直接用它的 rid）：" + "、".join(idle_names)
+        return out or "（当前预设没有部位）"
 
     def _history_text(self, contexts, turns: int) -> str:
         if not contexts:
@@ -1708,6 +1749,16 @@ class BodyMonitorPlugin(Star):
         try:
             resp = await asyncio.wait_for(provider.text_chat(prompt=prompt), timeout=90)
             raw = str(getattr(resp, "completion_text", "") or "")
+            try:
+                logger.info(
+                    "[body_monitor] 状态更新用量: prompt_chars=%s output_chars=%s usage=%s resp_fields=%s",
+                    len(prompt),
+                    len(raw),
+                    getattr(resp, "usage", None),
+                    list(vars(resp).keys()) if hasattr(resp, "__dict__") else type(resp).__name__,
+                )
+            except Exception:
+                pass
         except asyncio.TimeoutError:
             logger.warning("[body_monitor] 状态更新模型调用超时（90 秒）")
             return {"ok": False, "message": "状态更新模型调用超时"}
@@ -1740,6 +1791,7 @@ class BodyMonitorPlugin(Star):
                 for note in cur.get("notes") or []:
                     if isinstance(note, dict) and note.get("text"):
                         old_notes[self._clean_note(note["text"])] = note
+                notes_changed = False
                 if "notes" in upd:
                     notes_value = upd.get("notes")
                     if isinstance(notes_value, str):
@@ -1777,7 +1829,17 @@ class BodyMonitorPlugin(Star):
                             "expires": expires,
                             "level": int(level),
                         })
-                    cur["notes"] = new_notes[:max_notes]
+                    new_notes = new_notes[:max_notes]
+                    old_sig = [
+                        (self._clean_note(n.get("text")), int(n.get("level") or 0))
+                        for n in (cur.get("notes") or [])
+                        if isinstance(n, dict) and n.get("text")
+                    ]
+                    new_sig = [(n["text"], int(n["level"])) for n in new_notes]
+                    if new_sig != old_sig:
+                        cur["notes"] = new_notes
+                        notes_changed = True
+                old_temp = cur.get("temp")
                 if "temp" in upd:
                     value = upd.get("temp")
                     if value is None:
@@ -1789,6 +1851,12 @@ class BodyMonitorPlugin(Star):
                             pass
                 if isinstance(cur.get("temp"), bool) or not isinstance(cur.get("temp"), (int, float)):
                     cur["temp"] = baseline
+                try:
+                    temp_changed = abs(float(cur["temp"]) - float(old_temp)) >= 0.05
+                except Exception:
+                    temp_changed = True
+                if not notes_changed and not temp_changed:
+                    continue
                 cur["updated"] = now
                 preset_states[rid] = cur
                 changed.append((rid, valid[rid], cur))
@@ -1918,38 +1986,167 @@ class BodyMonitorPlugin(Star):
             except Exception:
                 pass
 
-    def _load_usage(self) -> dict:
-        raw = self._settings_raw()
-        data = dict(USAGE_DEFAULTS)
-        for key in ("noun", "verb", "adj"):
-            value = raw.get(key)
-            if isinstance(value, str):
-                data[key] = value.strip()[:24]
-        for key in ("noun", "verb", "adj"):
-            fallback = data[key]
-            options = self._clean_option_list(raw.get(key + "_options"), fallback)
-            current = data[key]
-            if current and current not in options:
-                options.insert(0, current)
-            if not current:
-                current = options[0] if options else USAGE_DEFAULTS[key]
-            data[key] = current
-            data[key + "_options"] = options
-        return data
-
     @staticmethod
-    def _clean_option_list(value, fallback) -> list:
-        options = []
+    def _clean_word(value, limit=24) -> str:
+        return str(value or "").strip()[:limit]
+
+    def _clean_words(self, value) -> list:
+        words = []
         if isinstance(value, list):
             for item in value:
-                text = str(item or "").strip()[:24]
-                if text and text not in options:
-                    options.append(text)
-        if not options:
-            text = str(fallback or "").strip()[:24]
-            if text:
-                options = [text]
-        return options[:30]
+                text = self._clean_word(item)
+                if text and text not in words:
+                    words.append(text)
+        return words[:30]
+
+    @staticmethod
+    def _default_usage_tree() -> list:
+        return json.loads(json.dumps(USAGE_DEFAULT_TREE))
+
+    def _sanitize_usage_tree(self, raw):
+        """校验 名词→形容词→动词 三层词库；返回 None 表示 payload 非法/缺失。"""
+        if not isinstance(raw, list):
+            return None
+        tree = []
+        seen_names = set()
+        for item in raw[:30]:
+            if not isinstance(item, dict):
+                continue
+            name = self._clean_word(item.get("n") or item.get("name"))
+            if not name or name in seen_names:
+                continue
+            seen_names.add(name)
+            raw_adjs = item.get("adjs")
+            if not isinstance(raw_adjs, list):
+                raw_adjs = item.get("adjectives")
+            adjs = []
+            seen_adjs = set()
+            for adj in (raw_adjs or [])[:30]:
+                if not isinstance(adj, dict):
+                    continue
+                adj_name = self._clean_word(adj.get("n") or adj.get("name"))
+                if not adj_name or adj_name in seen_adjs:
+                    continue
+                seen_adjs.add(adj_name)
+                verbs = []
+                for verb in (adj.get("verbs") or [])[:30]:
+                    word = self._clean_word(verb)
+                    if word and word not in verbs:
+                        verbs.append(word)
+                adjs.append({"n": adj_name, "verbs": verbs})
+            tree.append({"n": name, "adjs": adjs})
+        return tree
+
+    def _select_usage(self, tree, raw) -> dict:
+        """选中路径必须真实存在；不存在就回落到该层第一个子项。"""
+        selected = {"n": "", "a": "", "v": ""}
+        if not isinstance(tree, list) or not tree:
+            return selected
+        data = raw if isinstance(raw, dict) else {}
+        want_noun = self._clean_word(data.get("n") or data.get("noun"))
+        node = next((x for x in tree if x.get("n") == want_noun), tree[0])
+        selected["n"] = node.get("n", "")
+        adjs = node.get("adjs") or []
+        if adjs:
+            want_adj = self._clean_word(data.get("a") or data.get("adj"))
+            adj = next((x for x in adjs if x.get("n") == want_adj), adjs[0])
+            selected["a"] = adj.get("n", "")
+            verbs = adj.get("verbs") or []
+            if verbs:
+                want_verb = self._clean_word(data.get("v") or data.get("verb"))
+                selected["v"] = want_verb if want_verb in verbs else verbs[0]
+        return selected
+
+    def _usage_tree_from_legacy(self, raw) -> list:
+        """旧版是三个平铺列表，没有层级关系。
+
+        迁移策略：把全部形容词挂在“当前选中的名词”下，把全部动词挂在
+        “当前选中的形容词”下；其余名词/形容词保持为空，方便用户按新结构
+        重新整理，也不会凭空造出大量交叉组合。
+        """
+        data = raw if isinstance(raw, dict) else {}
+        nouns = self._clean_words(data.get("noun_options"))
+        if not nouns:
+            nouns = [self._clean_word(data.get("noun")) or USAGE_DEFAULTS["noun"]]
+        adjs = self._clean_words(data.get("adj_options"))
+        if not adjs:
+            adjs = [self._clean_word(data.get("adj")) or USAGE_DEFAULTS["adj"]]
+        verbs = self._clean_words(data.get("verb_options"))
+        if not verbs:
+            verbs = [self._clean_word(data.get("verb")) or USAGE_DEFAULTS["verb"]]
+
+        selected_noun = self._clean_word(data.get("noun"))
+        if selected_noun not in nouns:
+            selected_noun = nouns[0]
+        selected_adj = self._clean_word(data.get("adj"))
+        if selected_adj not in adjs:
+            selected_adj = adjs[0]
+        selected_verb = self._clean_word(data.get("verb"))
+        if selected_verb not in verbs:
+            selected_verb = verbs[0]
+
+        tree = []
+        for noun in nouns[:30]:
+            node = {"n": noun, "adjs": []}
+            if noun == selected_noun:
+                for adj in adjs[:30]:
+                    node["adjs"].append({
+                        "n": adj,
+                        "verbs": list(verbs[:30]) if adj == selected_adj else [],
+                    })
+            tree.append(node)
+        return tree
+
+    def _load_usage_state(self) -> dict:
+        raw = self._settings_raw()
+        tree = self._sanitize_usage_tree(raw.get("usage_tree"))
+        if tree is None:
+            tree = self._usage_tree_from_legacy(raw)
+        selected = self._select_usage(tree, raw.get("usage_selected") or {})
+        return {"tree": tree, "selected": selected}
+
+    def _load_usage(self) -> dict:
+        """当前选中的 名词/形容词/动词；任一层为空则对应值为空字符串。"""
+        selected = self._load_usage_state()["selected"]
+        return {
+            "noun": selected.get("n", ""),
+            "adj": selected.get("a", ""),
+            "verb": selected.get("v", ""),
+        }
+
+    def _usage_missing_message(self, usage=None) -> str:
+        usage = usage or self._load_usage()
+        noun = usage.get("noun", "")
+        adj = usage.get("adj", "")
+        verb = usage.get("verb", "")
+        if not noun:
+            return "词库是空的：先在「互动触碰」里建一个名词，再在它下面加形容词和动词"
+        if not adj:
+            return f"「{noun}」下还没有形容词：先到「互动触碰」里给它加一个形容词"
+        if not verb:
+            return f"「{noun} → {adj}」下还没有动词：先到「互动触碰」里给它加一个动词"
+        return ""
+
+    def _migrate_usage_settings(self):
+        """把旧版平铺词库迁移为三层树，只做一次。"""
+        try:
+            raw = self._settings_raw()
+            if not raw or isinstance(raw.get("usage_tree"), list):
+                return
+            tree = self._usage_tree_from_legacy(raw)
+            selected = self._select_usage(tree, {
+                "noun": raw.get("noun"),
+                "adj": raw.get("adj"),
+                "verb": raw.get("verb"),
+            })
+            raw["usage_tree"] = tree
+            raw["usage_selected"] = selected
+            for key in ("noun", "adj", "verb", "noun_options", "adj_options", "verb_options"):
+                raw.pop(key, None)
+            self._save_settings_raw(raw)
+            logger.info("[body_monitor] 旧词库已迁移为 名词→形容词→动词 三层结构")
+        except Exception as exc:
+            logger.warning("[body_monitor] 迁移旧词库失败: %s", exc)
 
     def _state_ui_settings(self, raw: dict | None = None) -> dict:
         if raw is None:
@@ -2018,9 +2215,18 @@ class BodyMonitorPlugin(Star):
         return str(safe or (DATA_DIR / "exports"))
 
     async def get_settings(self):
-        data = self._load_usage()
-        data["combo_window"] = self._combo_window()
-        data["export_dir"] = self._export_dir()
+        state = self._load_usage_state()
+        selected = state["selected"]
+        data = {
+            "usage_tree": state["tree"],
+            "usage_selected": selected,
+            # 兼容旧调用方；新 UI 只用上面两个字段
+            "noun": selected.get("n", ""),
+            "adj": selected.get("a", ""),
+            "verb": selected.get("v", ""),
+            "combo_window": self._combo_window(),
+            "export_dir": self._export_dir(),
+        }
         data.update(self._state_ui_settings())
         return {"status": "ok", "data": data}
 
@@ -2028,53 +2234,59 @@ class BodyMonitorPlugin(Star):
         from astrbot.api.web import request as req
 
         payload = await req.json(default={}) or {}
+        payload = payload if isinstance(payload, dict) else {}
         raw = self._settings_raw()
-        current_usage = self._load_usage()
-        for key in ("noun", "verb", "adj"):
-            options = payload.get(key + "_options") if isinstance(payload, dict) else None
-            if not isinstance(options, list):
-                options = current_usage.get(key + "_options") or [current_usage[key]]
-            options = self._clean_option_list(options, current_usage[key])
-            selected = payload.get(key) if isinstance(payload, dict) else None
-            if isinstance(selected, str):
-                selected = selected.strip()[:24]
-            else:
-                selected = current_usage[key]
-            if selected and selected not in options:
-                options.insert(0, selected)
-            if not selected:
-                selected = options[0] if options else current_usage[key]
-            raw[key] = selected
-            raw[key + "_options"] = options
-        if isinstance(payload, dict):
-            for key in (
-                "state_baseline_temp",
-                "state_min_duration",
-                "state_max_duration",
-                "state_max_notes",
-            ):
-                if key not in payload:
-                    continue
-                try:
-                    raw[key] = float(payload[key])
-                except Exception:
-                    continue
+        if "usage_tree" in payload or "usage_selected" in payload:
+            current = self._load_usage_state()
+            tree = self._sanitize_usage_tree(payload.get("usage_tree"))
+            if tree is None:
+                tree = current["tree"]
+            selected = self._select_usage(tree, payload.get("usage_selected") or {})
+            raw["usage_tree"] = tree
+            raw["usage_selected"] = selected
+            for key in ("noun", "adj", "verb", "noun_options", "adj_options", "verb_options"):
+                raw.pop(key, None)
+        for key in (
+            "state_baseline_temp",
+            "state_min_duration",
+            "state_max_duration",
+            "state_max_notes",
+        ):
+            if key not in payload:
+                continue
+            try:
+                raw[key] = float(payload[key])
+            except Exception:
+                continue
         ui_settings = self._state_ui_settings(raw)
         raw.update(ui_settings)
         self._save_settings_raw(raw)
 
-        combo_value = payload.get("combo_window") if isinstance(payload, dict) else None
+        combo_value = payload.get("combo_window")
         if isinstance(combo_value, (int, float)) and not isinstance(combo_value, bool):
             value = max(0.0, min(10.0, float(combo_value)))
             self.config["combo_window"] = value
             if await self._save_config():
                 logger.info("[body_monitor] 连击间隔已更新: %s 秒", value)
 
-        data = self._load_usage()
-        data["combo_window"] = self._combo_window()
-        data["export_dir"] = self._export_dir()
+        state = self._load_usage_state()
+        selected = state["selected"]
+        data = {
+            "usage_tree": state["tree"],
+            "usage_selected": selected,
+            "noun": selected.get("n", ""),
+            "adj": selected.get("a", ""),
+            "verb": selected.get("v", ""),
+            "combo_window": self._combo_window(),
+            "export_dir": self._export_dir(),
+        }
         data.update(ui_settings)
-        logger.info("[body_monitor] 用法设置已更新: %s", data)
+        logger.info(
+            "[body_monitor] 词库/设置已更新: 名词=%s 形容词=%s 动词=%s",
+            selected.get("n", ""),
+            selected.get("a", ""),
+            selected.get("v", ""),
+        )
         return {"status": "ok", "data": data}
 
     def _log(self, part: str, status: str, text: str):
